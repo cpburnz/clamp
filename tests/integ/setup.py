@@ -3,6 +3,7 @@ ez_setup.use_setuptools()
 
 import sys
 import os
+import zipfile
 
 from setuptools import setup, find_packages, Command
 from glob import glob
@@ -15,6 +16,7 @@ from clamp.commands import clamp_command
 
 from org.junit.runner import JUnitCore
 from javax.tools import ToolProvider
+from java.io import File
 from java.net import URLClassLoader
 from java.net import URL
 
@@ -34,18 +36,38 @@ class test_command(Command):
     def finalize_options(self):
         self.testjar = os.path.join(self.tempdir, 'tests.jar')
         self.test_classesdir = os.path.join(self.tempdir, 'classes')
+        self.supportjar = os.path.join(self.tempdir, 'support.jar')
+        self.support_classesdir = os.path.join(self.tempdir, 'support_classes')
+        self.support_sourcesdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'clamp_supports')
 
     def build_jar(self):
         build_jar_cmd = self.distribution.get_command_obj('build_jar')
         build_jar_cmd.output = os.path.join(self.testjar)
         self.run_command('build_jar')
 
+    def build_support_jar(self):
+        with zipfile.ZipFile(self.supportjar, 'w') as fh:
+            for path, _dirs, files in os.walk(self.support_classesdir):
+                for fname in files:
+                    fh.write(os.path.join(path, fname), os.path.relpath(os.path.join(path, fname), self.support_classesdir))
+
+    def import_support_jar(self):
+        addURL = URLClassLoader.getDeclaredMethod('addURL', [URL])
+        addURL.accessible = True
+        addURL.invoke(URLClassLoader.getSystemClassLoader(), [File(os.path.abspath(self.supportjar)).toURL()])
+
     def get_classpath(self):
         jython_dir = os.path.split(os.path.split(sys.executable)[0])[0]
         junit = glob(os.path.join(jython_dir, 'javalib/junit-*.jar'))[0]
 
         return ":".join([os.path.join(jython_dir, sys.JYTHON_DEV_JAR),
-                         junit, self.testjar])
+                         junit, self.supportjar, self.testjar])
+
+    def get_support_classpath(self):
+        jython_dir = os.path.split(os.path.split(sys.executable)[0])[0]
+        junit = glob(os.path.join(jython_dir, 'javalib/junit-*.jar'))[0]
+
+        return ":".join([os.path.join(jython_dir, sys.JYTHON_DEV_JAR), junit])
 
     def get_test_classes(self):
         urls = [URL('file:' + os.path.abspath(self.test_classesdir) + '/'),
@@ -60,6 +82,9 @@ class test_command(Command):
     def get_java_files(self):
         return [fname for fname in os.listdir(self.junit_testdir) if fname.endswith('java')]
 
+    def get_support_files(self):
+        return [os.path.relpath(os.path.join(path, fname), self.support_sourcesdir) for path, _dirs, files in os.walk(self.support_sourcesdir) for fname in files if fname.endswith('.java')]
+
     def run_javac(self):
         javac = ToolProvider.getSystemJavaCompiler()
         for fname in self.get_java_files():
@@ -67,6 +92,14 @@ class test_command(Command):
                                                os.path.join(self.junit_testdir, fname)])
             if err:
                 sys.exit()
+
+    def run_support_javac(self):
+        javac = ToolProvider.getSystemJavaCompiler()
+        for fname in self.get_support_files():
+            destdir = os.path.join(self.support_classesdir, os.path.dirname(fname))
+            self.mkpath(destdir)
+            err = javac.run(None, None, None, ['-cp', self.get_support_classpath(), '-d', destdir,
+                                                 os.path.join(self.support_sourcesdir, fname)])
 
     def run_junit(self):
         result = JUnitCore.runClasses(list(self.get_test_classes()))
@@ -78,6 +111,10 @@ class test_command(Command):
                 print failure
 
     def run(self):
+        self.mkpath(self.support_classesdir)
+        self.run_support_javac()
+        self.build_support_jar()
+        self.import_support_jar()
         self.mkpath(os.path.join(self.tempdir, 'classes'))
         self.build_jar()
         self.run_javac()
